@@ -1,0 +1,258 @@
+// PaperLens canonical store — Part B of the spec.
+//
+// Dev provider is SQLite for zero-setup runnability. The schema avoids native
+// enums and the Json scalar so it is portable: to move to Postgres (the spec's
+// recommended store), change `provider` to "postgresql" and point DATABASE_URL
+// at your instance — every model below is Postgres-clean. Enum-like columns use
+// String with documented allowed values; structured blobs use String holding
+// JSON.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// [1][2] Source images — every number traces back to a photo. Audit + dedup.
+// ---------------------------------------------------------------------------
+model SourceImage {
+  id          String   @id @default(cuid())
+  url         String // object-storage URL (Cloudinary/S3) or local /uploads path
+  hash        String // perceptual/content hash for dedup
+  docType     String // product_list | sales_sheet | expense | stock_count | unknown
+  status      String   @default("uploaded") // uploaded | processing | extracted | needs_review | committed | duplicate | failed
+  note        String? // freeform context the owner adds at capture ("Tues, Cascade")
+  width       Int?
+  height      Int?
+  uploadedAt  DateTime @default(now())
+  processedAt DateTime?
+
+  reviewItems    ReviewItem[]
+  sales          Sale[]
+  expenses       Expense[]
+  stockMovements StockMovement[]
+
+  @@index([hash])
+  @@index([docType, status])
+}
+
+// ---------------------------------------------------------------------------
+// [6] Catalogue — products / variants. Per-variant pricing is where margin lives.
+// ---------------------------------------------------------------------------
+model Product {
+  id        String   @id @default(cuid())
+  name      String
+  category  String?
+  sku       String?  @unique
+  createdAt DateTime @default(now())
+
+  variants Variant[]
+
+  @@index([name])
+}
+
+model Variant {
+  id         String  @id @default(cuid())
+  productId  String
+  product    Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  // free-text variant attributes e.g. {"color":"blue","size":"M"} as JSON string
+  attributes String  @default("{}")
+  label      String // human label e.g. "Marash pendant — blue"
+  unit       String  @default("pcs") // pcs | g | ml | ... gives extraction a target to snap to
+  costPrice  Float   @default(0) // material/making cost basis for COGS & margin
+  sellPrice  Float   @default(0)
+  currency   String  @default("AMD")
+  createdAt  DateTime @default(now())
+
+  stock          Stock[]
+  sales          Sale[]
+  stockMovements StockMovement[]
+  bom            BillOfMaterials[]
+
+  @@index([productId])
+  @@index([label])
+}
+
+// ---------------------------------------------------------------------------
+// Selling points — Cascade, Megamall, ... performance varies wildly by location.
+// ---------------------------------------------------------------------------
+model SellingPoint {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  location String?
+  type     String? // kiosk | shop | online | market
+
+  stock          Stock[]
+  sales          Sale[]
+  stockMovements StockMovement[]
+}
+
+// Per-variant-per-location on-hand snapshot (kept reconcilable via the ledger).
+model Stock {
+  id             String       @id @default(cuid())
+  variantId      String
+  variant        Variant      @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  sellingPointId String
+  sellingPoint   SellingPoint @relation(fields: [sellingPointId], references: [id], onDelete: Cascade)
+  qtyOnHand      Float        @default(0)
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([variantId, sellingPointId])
+}
+
+// ---------------------------------------------------------------------------
+// Raw materials + bill of materials — the inputs and true COGS.
+// ---------------------------------------------------------------------------
+model RawMaterial {
+  id                String  @id @default(cuid())
+  name              String
+  unit              String  @default("g")
+  qtyOnHand         Float   @default(0)
+  costPerUnit       Float   @default(0)
+  currency          String  @default("AMD")
+  reorderThreshold  Float   @default(0)
+
+  bom            BillOfMaterials[]
+  stockMovements StockMovement[]
+
+  @@index([name])
+}
+
+model BillOfMaterials {
+  id            String      @id @default(cuid())
+  variantId     String
+  variant       Variant     @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  rawMaterialId String
+  rawMaterial   RawMaterial @relation(fields: [rawMaterialId], references: [id], onDelete: Cascade)
+  qtyUsed       Float // material consumed per one unit sold
+
+  @@unique([variantId, rawMaterialId])
+}
+
+// ---------------------------------------------------------------------------
+// Sales — the revenue spine.
+// ---------------------------------------------------------------------------
+model Sale {
+  id             String       @id @default(cuid())
+  variantId      String
+  variant        Variant      @relation(fields: [variantId], references: [id])
+  sellingPointId String?
+  sellingPoint   SellingPoint? @relation(fields: [sellingPointId], references: [id])
+  date           DateTime
+  qty            Float
+  unitPrice      Float
+  total          Float
+  currency       String       @default("AMD")
+  paymentMethod  String? // cash | card | transfer
+  sourceImageId  String?
+  sourceImage    SourceImage? @relation(fields: [sourceImageId], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([date])
+  @@index([variantId])
+  @@index([sellingPointId])
+}
+
+// ---------------------------------------------------------------------------
+// Expenses — everything that isn't material cost.
+// ---------------------------------------------------------------------------
+model Expense {
+  id            String       @id @default(cuid())
+  date          DateTime
+  category      String // rent | wages | transport | packaging | fees | other
+  vendor        String?
+  amount        Float
+  currency      String       @default("AMD")
+  sourceImageId String?
+  sourceImage   SourceImage? @relation(fields: [sourceImageId], references: [id])
+  createdAt     DateTime     @default(now())
+
+  @@index([date])
+  @@index([category])
+}
+
+// ---------------------------------------------------------------------------
+// Stock movements — in/out ledger so stock is reconstructable, not a snapshot.
+// ---------------------------------------------------------------------------
+model StockMovement {
+  id             String       @id @default(cuid())
+  variantId      String?
+  variant        Variant?     @relation(fields: [variantId], references: [id])
+  rawMaterialId  String?
+  rawMaterial    RawMaterial? @relation(fields: [rawMaterialId], references: [id])
+  sellingPointId String?
+  sellingPoint   SellingPoint? @relation(fields: [sellingPointId], references: [id])
+  qtyDelta       Float // negative = out (sale/consumption), positive = in (restock)
+  reason         String // sale | restock | bom_consume | count_adjust | correction
+  date           DateTime
+  sourceImageId  String?
+  sourceImage    SourceImage? @relation(fields: [sourceImageId], references: [id])
+  createdAt      DateTime     @default(now())
+
+  @@index([date])
+  @@index([variantId])
+  @@index([rawMaterialId])
+}
+
+// ---------------------------------------------------------------------------
+// [5] Review queue — the human-in-the-loop work queue. Only uncertain fields.
+// ---------------------------------------------------------------------------
+model ReviewItem {
+  id             String       @id @default(cuid())
+  sourceImageId  String
+  sourceImage    SourceImage  @relation(fields: [sourceImageId], references: [id], onDelete: Cascade)
+  rowIndex       Int          @default(0) // which extracted row this field belongs to
+  field          String // e.g. "product", "qty", "unit_price", "date"
+  rawValue       String? // what the model read
+  suggestedValue String? // normalized/resolved suggestion
+  confidence     Float
+  status         String       @default("pending") // pending | approved | corrected | rejected
+  // full extracted row as JSON string, so committing has all sibling fields
+  rowPayload     String       @default("{}")
+  // crop box {x,y,w,h} in source-image fractions, for side-by-side review
+  cropBox        String?
+  correctedValue String?
+  resolvedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@index([status])
+  @@index([sourceImageId])
+}
+
+// ---------------------------------------------------------------------------
+// Staged rows — resolved/normalized output of layer [4] held between extraction
+// and commit. Auto-approved rows commit straight through; rows with linked
+// pending ReviewItems wait for the human. Carries the full payload as JSON.
+// ---------------------------------------------------------------------------
+model StagedRow {
+  id            String   @id @default(cuid())
+  sourceImageId String
+  docType       String
+  rowIndex      Int
+  payload       String   @default("{}") // resolved+normalized row as JSON string
+  needsReview   Boolean  @default(false)
+  status        String   @default("pending") // pending | committed | discarded
+  createdAt     DateTime @default(now())
+  committedAt   DateTime?
+
+  @@unique([sourceImageId, rowIndex])
+  @@index([sourceImageId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Accuracy loop — every correction becomes a few-shot example (Part C / Sprint 3).
+// ---------------------------------------------------------------------------
+model CorrectionExample {
+  id        String   @id @default(cuid())
+  docType   String
+  field     String
+  rawValue  String
+  corrected String
+  createdAt DateTime @default(now())
+
+  @@index([docType, field])
+}
