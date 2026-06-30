@@ -6,7 +6,10 @@ import path from "path";
 // site-relative URL; production would swap this for Cloudinary/S3 and return the
 // remote URL. The content hash powers duplicate-page detection.
 
-const UPLOAD_DIR = path.join(process.cwd(), "public", "uploads");
+// Defaults to /public/uploads (served by `next start` at /uploads). On Railway,
+// mount a persistent volume at this path so real photos survive redeploys; the
+// SVG demo pages are stored as data URLs in the DB and need no disk at all.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), "public", "uploads");
 
 export function hashContent(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex").slice(0, 32);

@@ -39,9 +39,16 @@ the product catalogue exists**, so onboarding ingests the price list first.
 ```bash
 npm install
 cp .env.example .env
-npm run db:reset      # create the SQLite schema + seed a realistic demo dataset
-npm run dev           # http://localhost:3000
+
+docker compose up -d        # local PostgreSQL (matches the Railway plugin)
+npm run db:migrate:dev      # apply migrations
+npm run db:seed             # load a realistic demo dataset
+
+npm run dev                 # http://localhost:3000
 ```
+
+No Docker? Point `DATABASE_URL` in `.env` at any PostgreSQL instance and run the
+same `db:migrate:dev` / `db:seed` steps.
 
 Then:
 
@@ -94,22 +101,35 @@ traces back to a `SourceImage`.
 
 ---
 
+## Deploy to Railway
+
+The repo ships ready for Railway (the spec's recommended host).
+
+1. **New Project → Deploy from GitHub** and select this repo.
+2. **Add a database:** *New → Database → PostgreSQL*.
+3. On the app service, set variables (Variables tab):
+   - `DATABASE_URL = ${{ Postgres.DATABASE_URL }}` — references the plugin.
+   - `ANTHROPIC_API_KEY` — optional; without it the mock extractor runs.
+   - `NEXT_PUBLIC_BASE_URL` — your Railway domain once assigned.
+4. Deploy. Railway uses [`railway.json`](./railway.json):
+   - **Build:** Nixpacks runs `npm install` (which runs `prisma generate`) then `npm run build`.
+   - **Start:** `npx prisma migrate deploy && npm run start` — migrations apply on every deploy.
+   - **Healthcheck:** [`/api/health`](./src/app/api/health/route.ts) verifies DB connectivity.
+5. **Seed the demo data once** (optional) from the service shell:
+   `npm run db:seed`.
+
+**Persisting uploaded photos:** the demo SVG pages are data URLs in the DB and
+need no disk. For real photo uploads, mount a Railway **volume** at
+`/app/public/uploads` (or point `UPLOAD_DIR` at the mount). For scale, swap the
+writer in `src/lib/storage.ts` for Cloudinary/S3 and return the remote URL.
+
 ## Database
 
-Dev uses **SQLite** (zero external services). The schema in
-`prisma/schema.prisma` is written to be **Postgres-portable** (no native enums or
-`Json` scalar). To move to the spec's recommended Postgres (e.g. on Railway):
-
-```prisma
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-```
-
-…then `prisma migrate deploy`. Image storage is abstracted in
-`src/lib/storage.ts` — swap the local writer for Cloudinary/S3 and return the
-remote URL.
+PostgreSQL via Prisma. The schema (`prisma/schema.prisma`) deliberately avoids
+native enums and the `Json` scalar to stay simple; migrations live in
+`prisma/migrations/`. Locally, `docker-compose.yml` provisions a matching
+Postgres. Apply schema changes with `npm run db:migrate:dev` (creates a
+migration) and ship them with `npm run db:migrate` (`prisma migrate deploy`).
 
 ## Scripts
 
@@ -117,9 +137,10 @@ remote URL.
 |--------|---------|
 | `npm run dev` | Dev server |
 | `npm run build` | `prisma generate` + production build |
-| `npm run db:push` | Sync schema to the database |
+| `npm run db:migrate:dev` | Create + apply a migration (dev) |
+| `npm run db:migrate` | Apply migrations (`prisma migrate deploy`, prod) |
 | `npm run db:seed` | Seed the demo dataset |
-| `npm run db:reset` | Force-reset schema + reseed |
+| `npm run db:reset` | Reset the database + reapply migrations + reseed |
 | `npm run typecheck` | `tsc --noEmit` |
 
 ## Tech

@@ -1,0 +1,24 @@
+# Local Postgres for development — mirrors the Railway Postgres plugin.
+#   docker compose up -d
+#   npm run db:migrate:dev   # apply migrations
+#   npm run db:seed          # load the demo dataset
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paperlens
+      POSTGRES_PASSWORD: paperlens
+      POSTGRES_DB: paperlens
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperlens"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

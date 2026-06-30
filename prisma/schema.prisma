@@ -1,18 +1,17 @@
 // PaperLens canonical store — Part B of the spec.
 //
-// Dev provider is SQLite for zero-setup runnability. The schema avoids native
-// enums and the Json scalar so it is portable: to move to Postgres (the spec's
-// recommended store), change `provider` to "postgresql" and point DATABASE_URL
-// at your instance — every model below is Postgres-clean. Enum-like columns use
-// String with documented allowed values; structured blobs use String holding
-// JSON.
+// Provider is PostgreSQL (the spec's recommended store; provisioned by Railway
+// in production, or a local Postgres via docker-compose for dev). The schema
+// deliberately avoids native enums and the Json scalar so it stays simple and
+// portable: enum-like columns use String with documented allowed values, and
+// structured blobs use String holding JSON.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
